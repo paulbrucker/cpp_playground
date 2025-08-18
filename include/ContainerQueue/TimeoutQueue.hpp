@@ -1,81 +1,26 @@
+#ifndef TIMEOUT_QUEUE_HPP
+#define TIMEOUT_QUEUE_HPP
+
+#include "Queue.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <limits>
 #include <utility>
 
-class Container
+namespace fcp
 {
-  public:
-    constexpr explicit Container(uint16_t id) : id_{id}
-    {
-    }
-    constexpr uint16_t GetId() const
-    {
-        return id_;
-    }
-
-  private:
-    uint16_t id_{};
-};
-
 // Queue API
 // Random deletion of elements
 // No duplets in the queue
 // No dynamic memory allocation
-class TimeoutQueue
+template <typename T> class TimeoutQueue : public Queue
 {
+    static_assert(std::is_same<decltype(std::declval<const T &>().GetId()), uint16_t>::value,
+                  "TimeoutQueue requires T to have a method `uint16_t GetId() const`");
+    using Status = Queue::Status;
+
   public:
-    /**
-     * @enum Status
-     * @brief Represents the status codes returned by TimeoutQueue operations.
-     *
-     * The Status enum provides a set of possible outcomes for queue operations,
-     * such as success, error, or special conditions.
-     *
-     * Values:
-     * - Ok: Operation completed successfully.
-     * - Full: The queue is full and cannot accept more elements.
-     * - Empty: The queue is empty and there are no elements to retrieve.
-     * - Null: A null pointer or invalid reference was encountered.
-     * - Duplicate: An attempt was made to insert a duplicate element.
-     * - NotFound: The requested element was not found in the queue.
-     * - InvalidId: An invalid identifier was provided.
-     */
-    enum class Status
-    {
-        Ok = 0,
-        Full = -1,
-        Empty = -2,
-        Null = -3,
-        Duplicate = -4,
-        NotFound = -5,
-        InvalidId = -6
-    };
-
-    static constexpr const char *to_string(Status s) noexcept
-    {
-        switch (s)
-        {
-        case Status::Ok:
-            return "Ok";
-        case Status::Full:
-            return "Full";
-        case Status::Empty:
-            return "Empty";
-        case Status::Null:
-            return "Null";
-        case Status::Duplicate:
-            return "Duplicate";
-        case Status::NotFound:
-            return "NotFound";
-        case Status::InvalidId:
-            return "InvalidId";
-        default:
-            return "Unknown";
-        }
-    }
-
     /**
      * @brief Constructs a TimeoutQueue with the specified capacity.
      *
@@ -83,7 +28,9 @@ class TimeoutQueue
      *
      * @param capacity The maximum number of elements the queue can hold.
      */
-    explicit TimeoutQueue(uint16_t capacity);
+    explicit TimeoutQueue(uint16_t capacity) : capacity_{capacity}
+    {
+    }
 
     TimeoutQueue(const TimeoutQueue &) = delete;
     TimeoutQueue &operator=(const TimeoutQueue &) = delete;
@@ -102,7 +49,35 @@ class TimeoutQueue
      *         - Status::Duplicate if the container is already in the queue.
      *         - Status::Full if the queue is full.
      */
-    Status push(Container &c);
+    Status push(T &c)
+    {
+        if (full())
+        {
+            return Status::Full;
+        }
+
+        auto const id = c.GetId();
+
+        if (!IdValid(id))
+        {
+            return Status::InvalidId;
+        }
+
+        auto &node = data_[id];
+
+        if (node)
+        {
+            return Status::Duplicate;
+        }
+
+        // Fill node with data
+        node.data = &c;
+
+        // Link the next and prev
+        link(node);
+        size_++;
+        return Status::Ok;
+    }
 
     /**
      * @brief Retrieves, but does not remove, the front element of the queue.
@@ -112,7 +87,16 @@ class TimeoutQueue
      *
      * @note The caller does not take ownership of the returned pointer.
      */
-    Status front(Container *&out) const;
+    Status front(T *&out) const
+    {
+        if (empty())
+        {
+            return Status::Empty;
+        }
+
+        out = data_[head_].data;
+        return Status::Ok;
+    }
 
     /**
      * @brief Removes and retrieves the next element from the queue.
@@ -123,7 +107,17 @@ class TimeoutQueue
      * @param[out] out Reference to a pointer that will be set to the popped element.
      * @return Status indicating the result of the operation (e.g., success, timeout, or empty queue).
      */
-    Status pop(Container *&out);
+    Status pop(T *&out)
+    {
+        auto const result = front(out);
+        if (result != Status::Ok)
+        {
+            return result;
+        }
+        unlink(data_[head_]);
+        size_--;
+        return Status::Ok;
+    }
 
     /**
      * @brief Removes the specified container from the queue.
@@ -136,13 +130,41 @@ class TimeoutQueue
      * @param c Reference to the container to be removed from the queue.
      * @return Status indicating the result of the removal operation.
      */
-    Status remove(Container &c);
+    Status remove(T &c)
+    {
+        if (empty())
+        {
+            return Status::Empty;
+        }
+        auto const id = c.GetId();
+        if (!IdValid(id))
+        {
+            return Status::InvalidId;
+        }
+        auto &node = data_[id];
+        if (!node)
+        {
+            return Status::NotFound;
+        }
+        unlink(node);
+        size_--;
+        return Status::Ok;
+    }
 
-    std::size_t size() const;
+    std::size_t size() const
+    {
+        return size_;
+    }
 
-    bool full() const;
+    bool full() const
+    {
+        return size_ == capacity_;
+    }
 
-    bool empty() const;
+    bool empty() const
+    {
+        return size_ == 0;
+    }
 
   private:
     static constexpr uint16_t kNil{std::numeric_limits<uint16_t>::max()};
@@ -151,18 +173,57 @@ class TimeoutQueue
     {
         uint16_t prev{kNil};
         uint16_t next{kNil};
-        Container *data{nullptr};
+        T *data{nullptr};
         constexpr operator bool() const
         {
             return data != nullptr;
         }
     };
 
-    bool IdValid(uint16_t id) const;
+    bool IdValid(uint16_t id) const
+    {
+        return id < capacity_;
+    }
 
-    void link(Node &n);
+    void link(Node &n)
+    {
+        auto const id = n.data->GetId();
+        n.prev = tail_;
+        n.next = kNil;
+        if (tail_ != kNil)
+        {
+            data_[tail_].next = id;
+        }
+        else
+        {
+            head_ = id;
+        }
+        tail_ = id;
+    }
 
-    void unlink(Node &n);
+    void unlink(Node &n)
+    {
+        // auto const id = n.data->GetId();
+        if (n.prev != kNil)
+        {
+            data_[n.prev].next = n.next;
+        }
+        else
+        {
+            head_ = n.next;
+        }
+        if (n.next != kNil)
+        {
+            data_[n.next].prev = n.prev;
+        }
+        else
+        {
+            tail_ = n.prev;
+        }
+        n.prev = kNil;
+        n.next = kNil;
+        n.data = nullptr;
+    }
 
     std::size_t size_{0};
     uint16_t capacity_;
@@ -170,3 +231,7 @@ class TimeoutQueue
     uint16_t tail_ = kNil;
     std::array<Node, kNil> data_;
 };
+
+} // namespace fcp
+
+#endif

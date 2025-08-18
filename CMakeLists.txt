@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(MyProject)
+project(fcp_queue VERSION 0.1)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -8,6 +8,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(Dependencies.cmake)
 include(ProjectOptions.cmake)
+
+include(GNUInstallDirs)
 
 # Enable all warnings and treat warnings as errors.
 # Warning on signed/unsigned comparison is disabled to allow comparison of
@@ -27,6 +29,18 @@ endif()
 if(BUILD_DOXYGEN)
     add_subdirectory(docs)
 endif()
+
+# Add library
+
+add_library(${PROJECT_NAME}_lib INTERFACE)
+
+target_include_directories(
+  ${PROJECT_NAME}_lib
+  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+
+target_compile_features(${PROJECT_NAME}_lib INTERFACE cxx_std_14)
+
 
 # Add subdirectories with code
 add_subdirectory(src)
