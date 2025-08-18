@@ -14,10 +14,12 @@ namespace fcp
 // Random deletion of elements
 // No duplets in the queue
 // No dynamic memory allocation
-template <typename T> class TimeoutQueue : public Queue
+template <typename T, typename TMutex, typename TSemaphore, typename TMutexTrait, typename TSemaphoreTrait>
+class TimeoutQueue : public Queue
 {
     static_assert(std::is_same<decltype(std::declval<const T &>().GetId()), uint16_t>::value,
                   "TimeoutQueue requires T to have a method `uint16_t GetId() const`");
+
     using Status = Queue::Status;
 
   public:
@@ -30,6 +32,8 @@ template <typename T> class TimeoutQueue : public Queue
      */
     explicit TimeoutQueue(uint16_t capacity) : capacity_{capacity}
     {
+        TMutexTrait::init(mutex_);
+        TSemaphoreTrait::init(semaphore_);
     }
 
     TimeoutQueue(const TimeoutQueue &) = delete;
@@ -51,8 +55,11 @@ template <typename T> class TimeoutQueue : public Queue
      */
     Status push(T &c)
     {
-        if (full())
+        TMutexTrait::lock(mutex_);
+
+        if (full_impl())
         {
+            TMutexTrait::unlock(mutex_);
             return Status::Full;
         }
 
@@ -60,6 +67,7 @@ template <typename T> class TimeoutQueue : public Queue
 
         if (!IdValid(id))
         {
+            TMutexTrait::unlock(mutex_);
             return Status::InvalidId;
         }
 
@@ -67,6 +75,7 @@ template <typename T> class TimeoutQueue : public Queue
 
         if (node)
         {
+            TMutexTrait::unlock(mutex_);
             return Status::Duplicate;
         }
 
@@ -76,6 +85,10 @@ template <typename T> class TimeoutQueue : public Queue
         // Link the next and prev
         link(node);
         size_++;
+
+        TMutexTrait::unlock(mutex_);
+        TSemaphoreTrait::notify(semaphore_);
+
         return Status::Ok;
     }
 
@@ -89,12 +102,18 @@ template <typename T> class TimeoutQueue : public Queue
      */
     Status front(T *&out) const
     {
-        if (empty())
+        TMutexTrait::lock(mutex_);
+
+        if (empty_impl())
         {
+            TMutexTrait::unlock(mutex_);
             return Status::Empty;
         }
 
         out = data_[head_].data;
+
+        TMutexTrait::unlock(mutex_);
+
         return Status::Ok;
     }
 
@@ -107,15 +126,32 @@ template <typename T> class TimeoutQueue : public Queue
      * @param[out] out Reference to a pointer that will be set to the popped element.
      * @return Status indicating the result of the operation (e.g., success, timeout, or empty queue).
      */
-    Status pop(T *&out)
+    Status pop(T *&out, long timeout_us = 0)
     {
-        auto const result = front(out);
-        if (result != Status::Ok)
+
+        // Wait for an element to be available (this handles the mutex locking internally)
+        auto pred = [this]{ return !empty_impl(); };
+        bool const ok = TSemaphoreTrait::wait(semaphore_, mutex_, pred, timeout_us);
+        if (!ok)
         {
-            return result;
+            return Status::Empty;
         }
+
+        // // At this point, the mutex should be locked and we have at least one element
+        // // Double-check that we're not empty (defensive programming)
+        // if (empty_impl())
+        // {
+        //     TMutexTrait::unlock(mutex_);
+        //     return Status::Empty;
+        // }
+
+        // Get the front element and remove it
+        out = data_[head_].data;
         unlink(data_[head_]);
         size_--;
+
+        TMutexTrait::unlock(mutex_);
+
         return Status::Ok;
     }
 
@@ -132,41 +168,68 @@ template <typename T> class TimeoutQueue : public Queue
      */
     Status remove(T &c)
     {
-        if (empty())
+        TMutexTrait::lock(mutex_);
+
+        if (empty_impl())
         {
+            TMutexTrait::unlock(mutex_);
             return Status::Empty;
         }
+
         auto const id = c.GetId();
         if (!IdValid(id))
         {
+            TMutexTrait::unlock(mutex_);
             return Status::InvalidId;
         }
         auto &node = data_[id];
         if (!node)
         {
+            TMutexTrait::unlock(mutex_);
             return Status::NotFound;
         }
         unlink(node);
         size_--;
+
+        TMutexTrait::unlock(mutex_);
+
         return Status::Ok;
     }
 
     std::size_t size() const
     {
-        return size_;
+        TMutexTrait::lock(mutex_);
+        auto const size{size_impl()};
+        TMutexTrait::unlock(mutex_);
+        return size;
     }
 
     bool full() const
     {
-        return size_ == capacity_;
+        return size() == capacity_;
     }
 
     bool empty() const
     {
-        return size_ == 0;
+        return size() == 0;
     }
 
   private:
+
+    std::size_t size_impl() const
+    {
+        return size_;
+    }
+    bool full_impl() const
+    {
+        return size_impl() == capacity_;
+    }
+
+    bool empty_impl() const
+    {
+        return size_impl() == 0;
+    }
+
     static constexpr uint16_t kNil{std::numeric_limits<uint16_t>::max()};
 
     struct Node
@@ -230,6 +293,9 @@ template <typename T> class TimeoutQueue : public Queue
     uint16_t head_ = kNil;
     uint16_t tail_ = kNil;
     std::array<Node, kNil> data_;
+
+    mutable TMutex mutex_;
+    TSemaphore semaphore_;
 };
 
 } // namespace fcp

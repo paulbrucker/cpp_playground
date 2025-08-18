@@ -1,7 +1,11 @@
 #include "ContainerQueue/TimeoutQueue.hpp"
+#include <condition_variable>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <vector>
+
+#define UNUSED(x) (void)(x)
 
 class MockContainer
 {
@@ -18,8 +22,66 @@ class MockContainer
     uint16_t id_{};
 };
 
+// Primary template for MutexTraits (empty, to be specialized)
+template <typename T> struct MutexTraits;
+
+// Traits for std::mutex
+template <> struct MutexTraits<std::mutex>
+{
+    static void init(std::mutex &mtx)
+    {
+        UNUSED(mtx);
+    }
+    static void lock(std::mutex &mtx)
+    {
+        mtx.lock();
+    }
+    static void unlock(std::mutex &mtx)
+    {
+        mtx.unlock();
+    }
+};
+
+// Primary template for SemaphoreTraits (empty, to be specialized)
+template <typename T> struct SemaphoreTraits;
+
+// Traits for std::condition_variable (used as a semaphore)
+template <> struct SemaphoreTraits<std::condition_variable>
+{
+    static void init(std::condition_variable &cv)
+    {
+        UNUSED(cv);
+    }
+
+    template <typename Predicate>
+    static bool wait(std::condition_variable &cv, std::mutex &mtx, Predicate pred, long timeout_us = 0)
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        if (timeout_us < 0)
+        {
+            cv.wait(lock, pred);
+            return true;
+        }
+        else if (timeout_us == 0)
+        {
+            // Non-blocking: just check the predicate
+            return pred();
+        }
+        else
+        {
+            return cv.wait_for(lock, std::chrono::microseconds(timeout_us), pred);
+        }
+    }
+
+    static void notify(std::condition_variable &cv)
+    {
+        cv.notify_one();
+    }
+};
+
 using Container = MockContainer;
-using TimeoutQueue = fcp::TimeoutQueue<MockContainer>;
+using TimeoutQueue = fcp::TimeoutQueue<MockContainer, std::mutex, std::condition_variable, MutexTraits<std::mutex>,
+                                       SemaphoreTraits<std::condition_variable>>;
 using Status = fcp::Queue::Status;
 
 class TimeoutQueueTest : public ::testing::Test
@@ -380,4 +442,180 @@ TEST_F(TimeoutQueueTest, StateConsistency)
     EXPECT_TRUE(queue->empty());
     EXPECT_FALSE(queue->full());
     EXPECT_EQ(queue->size(), 0);
+}
+// Test concurrent push operations
+TEST_F(TimeoutQueueTest, ConcurrentPush)
+{
+    constexpr int num_threads = 5;
+    constexpr int pushes_per_thread = 2;
+    std::vector<std::thread> threads;
+    std::atomic<int> success_count{0};
+
+    for (int t = 0; t < num_threads; ++t)
+    {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < pushes_per_thread; ++i)
+            {
+                uint16_t id = t * pushes_per_thread + i;
+                if (id < 10)
+                {
+                    Container c(id);
+                    if (queue->push(c) == Status::Ok)
+                        ++success_count;
+                }
+            }
+        });
+    }
+    for (auto &th : threads)
+        th.join();
+
+    EXPECT_EQ(queue->size(), 10);
+    EXPECT_EQ(success_count, 10);
+    EXPECT_TRUE(queue->full());
+}
+
+// Test concurrent pop operations
+TEST_F(TimeoutQueueTest, ConcurrentPop)
+{
+    std::vector<Container> containers;
+    // Fill the queue first
+    for (uint16_t i = 0; i < 10; ++i)
+    {
+        containers.push_back(Container(i));
+        EXPECT_EQ(queue->push(containers.back()), Status::Ok);
+    }
+
+    std::vector<std::thread> threads;
+    std::atomic<int> pop_count{0};
+
+    for (int t = 0; t < 10; ++t)
+    {
+        threads.emplace_back([&]() {
+            Container *out = nullptr;
+            if (queue->pop(out) == Status::Ok)
+                ++pop_count;
+        });
+    }
+    for (auto &th : threads)
+        th.join();
+
+    EXPECT_EQ(queue->size(), 0);
+    EXPECT_EQ(pop_count, 10);
+    EXPECT_TRUE(queue->empty());
+}
+
+// Test concurrent push and pop
+TEST_F(TimeoutQueueTest, ConcurrentPushPop)
+{
+    constexpr int num_threads = 5;
+    std::vector<std::thread> push_threads, pop_threads;
+    std::atomic<int> push_count{0}, pop_count{0};
+
+    // Push threads
+    for (int t = 0; t < num_threads; ++t)
+    {
+        push_threads.emplace_back([&, t]() {
+            for (int i = 0; i < 2; ++i)
+            {
+                uint16_t id = t * 2 + i;
+                if (id < 10)
+                {
+                    Container c(id);
+                    if (queue->push(c) == Status::Ok)
+                        ++push_count;
+                }
+            }
+        });
+    }
+
+    // Pop threads
+    for (int t = 0; t < num_threads; ++t)
+    {
+        pop_threads.emplace_back([&]() {
+            Container *out = nullptr;
+            if (queue->pop(out) == Status::Ok)
+                ++pop_count;
+        });
+    }
+
+    for (auto &th : push_threads)
+        th.join();
+    for (auto &th : pop_threads)
+        th.join();
+
+    EXPECT_LE(queue->size(), 10);
+    EXPECT_EQ(push_count, 10);
+    EXPECT_EQ(pop_count, 5);
+}
+
+// Test concurrent remove
+TEST_F(TimeoutQueueTest, ConcurrentRemove)
+{
+    // Fill the queue
+    std::vector<Container> containers;
+    // Fill the queue first
+    for (uint16_t i = 0; i < 10; ++i)
+    {
+        containers.push_back(Container(i));
+        EXPECT_EQ(queue->push(containers.back()), Status::Ok);
+    }
+
+    std::vector<std::thread> threads;
+    std::atomic<int> remove_count{0};
+
+    for (uint16_t i = 0; i < 10; ++i)
+    {
+        threads.emplace_back([&, i]() {
+            if (queue->remove(containers[i]) == Status::Ok)
+                ++remove_count;
+        });
+    }
+    for (auto &th : threads)
+        th.join();
+
+    EXPECT_EQ(remove_count, 10);
+    EXPECT_TRUE(queue->empty());
+}
+
+// Test concurrent push, pop, and remove
+TEST_F(TimeoutQueueTest, ConcurrentPushPopRemove)
+{
+    constexpr int num_threads = 4;
+    std::vector<std::thread> threads;
+    std::atomic<int> push_count{0}, pop_count{0}, remove_count{0};
+    std::vector<Container> containers;
+
+    for (uint16_t i = 0; i < 10; ++i)
+    {
+        containers.push_back(Container(i));
+    }
+
+    // Pre-fill with 4 elements
+    for (uint16_t i = 0; i < 4; ++i)
+    {
+        EXPECT_EQ(queue->push(containers[i]), Status::Ok);
+    }
+
+    // Each thread does a push, pop, and remove
+    for (int t = 0; t < num_threads; ++t)
+    {
+        threads.emplace_back([&, t]() {
+            uint16_t id = t + 4;
+            if (queue->push(containers[id]) == Status::Ok)
+                ++push_count;
+            Container *out = nullptr;
+            if (queue->pop(out) == Status::Ok)
+                ++pop_count;
+            if (queue->remove(containers[id]) == Status::Ok)
+                ++remove_count;
+        });
+    }
+    for (auto &th : threads)
+        th.join();
+
+    // The queue may be empty or have a few elements left, but all operations should be thread-safe
+    EXPECT_LE(queue->size(), 10);
+    EXPECT_EQ(push_count, 4);
+    EXPECT_EQ(pop_count, 4);
+    EXPECT_LE(remove_count, 4);
 }

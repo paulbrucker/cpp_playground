@@ -31,7 +31,8 @@ class Queue
         Null = -3,
         Duplicate = -4,
         NotFound = -5,
-        InvalidId = -6
+        InvalidId = -6,
+        Timeout = -7
     };
 
     static constexpr const char *to_string(Status s) noexcept
