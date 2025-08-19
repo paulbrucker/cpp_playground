@@ -10,10 +10,27 @@
 
 namespace fcp
 {
-// Queue API
-// Random deletion of elements
-// No duplets in the queue
-// No dynamic memory allocation
+
+/**
+ * @brief A fixed-capacity, thread-safe queue with O(1) random removal and no duplicate elements.
+ *
+ * The TimeoutQueue class provides a queue-like container with the following features:
+ * - No duplicate elements: Each element is uniquely identified by its `GetId()` method, and only one instance of each
+ * ID can exist in the queue at a time.
+ * - O(1) random removal: Elements can be removed from any position in the queue in constant time using their ID.
+ * - No dynamic memory allocation: All storage is preallocated based on the specified capacity.
+ * - Thread safety: All operations are protected by user-supplied mutex and semaphore types/traits.
+ * - Supports blocking pop operations with optional timeout.
+ *
+ * @tparam T               The type of elements stored in the queue. Must provide `uint16_t GetId() const`.
+ * @tparam TMutex          Mutex type for thread safety.
+ * @tparam TSemaphore      Semaphore type for blocking operations.
+ * @tparam TMutexTrait     Trait class providing static lock/unlock/init for TMutex.
+ * @tparam TSemaphoreTrait Trait class providing static wait/notify/init for TSemaphore.
+ *
+ * Typical use cases include resource pools, task queues, or any scenario where fast, thread-safe, duplicate-free
+ * queueing with random removal is required.
+ */
 template <typename T, typename TMutex, typename TSemaphore, typename TMutexTrait, typename TSemaphoreTrait>
 class TimeoutQueue : public Queue
 {
@@ -130,20 +147,12 @@ class TimeoutQueue : public Queue
     {
 
         // Wait for an element to be available (this handles the mutex locking internally)
-        auto pred = [this]{ return !empty_impl(); };
+        auto pred = [this] { return !empty_impl(); };
         bool const ok = TSemaphoreTrait::wait(semaphore_, mutex_, pred, timeout_us);
         if (!ok)
         {
             return Status::Empty;
         }
-
-        // // At this point, the mutex should be locked and we have at least one element
-        // // Double-check that we're not empty (defensive programming)
-        // if (empty_impl())
-        // {
-        //     TMutexTrait::unlock(mutex_);
-        //     return Status::Empty;
-        // }
 
         // Get the front element and remove it
         out = data_[head_].data;
@@ -215,7 +224,6 @@ class TimeoutQueue : public Queue
     }
 
   private:
-
     std::size_t size_impl() const
     {
         return size_;
